@@ -1,0 +1,1043 @@
+class ZCL_DEP_EXTRACTOR definition
+  public
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ty_root,
+             name TYPE sobj_name,
+             type TYPE trobjtype,
+           END OF ty_root .
+  types:
+    BEGIN OF ty_ref,
+             name TYPE sobj_name,
+             type TYPE trobjtype,
+           END OF ty_ref .
+  types:
+    ty_ref_tab TYPE STANDARD TABLE OF ty_ref WITH DEFAULT KEY .
+  types:
+    BEGIN OF ty_node,
+             name        TYPE sobj_name,
+             type        TYPE trobjtype,
+             package     TYPE devclass,
+             description TYPE string,
+             parent      TYPE sobj_name,
+             depth       TYPE i,
+             is_standard TYPE abap_bool,
+           END OF ty_node .
+  types:
+    ty_node_tab TYPE STANDARD TABLE OF ty_node WITH DEFAULT KEY .
+  types:
+    BEGIN OF ty_stats,
+             objects_count     TYPE i,
+             standard_count    TYPE i,
+             max_depth_reached TYPE i,
+             truncated         TYPE abap_bool,
+             runtime_ms        TYPE i,
+           END OF ty_stats .
+  types:
+    ty_source_tab TYPE STANDARD TABLE OF string WITH DEFAULT KEY .
+  types:
+    BEGIN OF ty_serialized,
+             name        TYPE sobj_name,
+             type        TYPE trobjtype,
+             package     TYPE devclass,
+             description TYPE string,
+             source      TYPE ty_source_tab,
+           END OF ty_serialized .
+
+    "! Preenchido quando um metodo falha (ex.: objeto nao encontrado).
+    "! Vazio = sucesso. Verifique apos normalize_root / serialize_object.
+  data MV_ERROR type STRING read-only .
+
+  methods NORMALIZE_ROOT
+    importing
+      !IV_OBJECT type CSEQUENCE
+      !IV_TYPE type TROBJTYPE optional
+    returning
+      value(RS_ROOT) type TY_ROOT .
+  methods RESOLVE_CLOSURE
+    importing
+      !IV_NAME type SOBJ_NAME
+      !IV_TYPE type TROBJTYPE
+      !IV_DEPTH type I default 10
+      !IV_MAX_OBJECTS type I default 500
+    exporting
+      !ET_OBJECTS type TY_NODE_TAB
+      !ET_LEAVES type TY_NODE_TAB
+      !ES_STATS type TY_STATS .
+  methods SERIALIZE_OBJECT
+    importing
+      !IV_NAME type SOBJ_NAME
+      !IV_TYPE type TROBJTYPE optional
+    returning
+      value(RS_RESULT) type TY_SERIALIZED .
+  PRIVATE SECTION.
+
+    CONSTANTS: c_prog TYPE trobjtype VALUE 'PROG',
+               c_clas TYPE trobjtype VALUE 'CLAS',
+               c_intf TYPE trobjtype VALUE 'INTF',
+               c_fugr TYPE trobjtype VALUE 'FUGR',
+               c_func TYPE trobjtype VALUE 'FUNC',
+               c_tabl TYPE trobjtype VALUE 'TABL',
+               c_dtel TYPE trobjtype VALUE 'DTEL',
+               c_doma TYPE trobjtype VALUE 'DOMA',
+               c_tran TYPE trobjtype VALUE 'TRAN'.
+
+    TYPES: BEGIN OF ty_incl,
+             include TYPE programm,
+           END OF ty_incl,
+           ty_incl_tab TYPE STANDARD TABLE OF ty_incl WITH DEFAULT KEY.
+
+    METHODS detect_type
+      IMPORTING iv_name      TYPE sobj_name
+      RETURNING VALUE(rv)    TYPE trobjtype.
+
+    METHODS is_customer
+      IMPORTING iv_name   TYPE sobj_name
+      RETURNING VALUE(rv) TYPE abap_bool.
+
+    METHODS extract_between
+      IMPORTING iv_text   TYPE csequence
+                iv_key    TYPE csequence
+      RETURNING VALUE(rv) TYPE string.
+
+    METHODS get_package
+      IMPORTING iv_name   TYPE sobj_name
+                iv_type   TYPE trobjtype
+      RETURNING VALUE(rv) TYPE devclass.
+
+    METHODS get_description
+      IMPORTING iv_name   TYPE sobj_name
+                iv_type   TYPE trobjtype
+      RETURNING VALUE(rv) TYPE string.
+
+    METHODS classify_name
+      IMPORTING iv_name   TYPE csequence
+      RETURNING VALUE(rv) TYPE trobjtype.
+
+    METHODS get_dependencies
+      IMPORTING iv_name        TYPE sobj_name
+                iv_type        TYPE trobjtype
+      RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+
+    METHODS collect_includes
+      IMPORTING iv_prog        TYPE programm
+      RETURNING VALUE(rt_incl) TYPE ty_incl_tab.
+
+    METHODS class_includes
+      IMPORTING iv_name   TYPE csequence
+      RETURNING VALUE(rt_incl) TYPE ty_incl_tab.
+
+    METHODS refs_from_includes
+      IMPORTING it_incl        TYPE ty_incl_tab
+      RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+
+    METHODS deps_program IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+    METHODS deps_class   IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+    METHODS deps_fugr    IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+    METHODS deps_func    IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+    METHODS deps_table   IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+    METHODS deps_dtel    IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_refs) TYPE ty_ref_tab.
+
+    METHODS read_program_source IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_class_source   IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_fugr_source    IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_func_source    IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_table_def      IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_dtel_def       IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_doma_def       IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+    METHODS read_tran_def       IMPORTING iv_name TYPE sobj_name RETURNING VALUE(rt_source) TYPE ty_source_tab.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_DEP_EXTRACTOR IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->CLASSIFY_NAME
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        CSEQUENCE
+* | [<-()] RV                             TYPE        TROBJTYPE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD classify_name.
+    DATA lv_clstype TYPE seoclass-clstype.
+
+    SELECT SINGLE clstype FROM seoclass INTO lv_clstype WHERE clsname = iv_name.
+    IF sy-subrc = 0.
+      IF lv_clstype = 1.
+        rv = c_intf.
+      ELSE.
+        rv = c_clas.
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM dd02l WHERE tabname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_tabl.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM dd04l WHERE rollname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_dtel.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM trdir WHERE name = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_prog.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM tfdir WHERE funcname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_func.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->CLASS_INCLUDES
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        CSEQUENCE
+* | [<-()] RT_INCL                        TYPE        TY_INCL_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD class_includes.
+    DATA: lt_methods TYPE seop_methods_w_include,
+          ls_incl    TYPE ty_incl,
+          lv_clsname TYPE seoclsname.
+    FIELD-SYMBOLS <m> TYPE seop_method_w_include.
+
+    lv_clsname = iv_name.
+    CALL METHOD cl_oo_classname_service=>get_all_method_includes
+      EXPORTING  clsname            = lv_clsname
+      RECEIVING  result             = lt_methods
+      EXCEPTIONS class_not_existing = 1
+                 OTHERS             = 2.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    LOOP AT lt_methods ASSIGNING <m>.
+      ls_incl-include = <m>-incname.
+      APPEND ls_incl TO rt_incl.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->COLLECT_INCLUDES
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_PROG                        TYPE        PROGRAMM
+* | [<-()] RT_INCL                        TYPE        TY_INCL_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD collect_includes.
+    DATA: lt_queue    TYPE STANDARD TABLE OF programm,
+          lt_children TYPE STANDARD TABLE OF programm,
+          lv_idx      TYPE i,
+          lv_master   TYPE programm,
+          ls_incl     TYPE ty_incl.
+    FIELD-SYMBOLS: <p> TYPE programm,
+                   <c> TYPE programm.
+
+    ls_incl-include = iv_prog.
+    APPEND ls_incl TO rt_incl.
+    APPEND iv_prog TO lt_queue.
+
+    lv_idx = 1.
+    WHILE lv_idx <= lines( lt_queue ).
+      READ TABLE lt_queue INDEX lv_idx ASSIGNING <p>.
+      lv_idx = lv_idx + 1.
+      lv_master = <p>.
+
+      CLEAR lt_children.
+      SELECT include FROM d010inc INTO TABLE lt_children WHERE master = lv_master.
+      LOOP AT lt_children ASSIGNING <c>.
+        READ TABLE rt_incl WITH KEY include = <c> TRANSPORTING NO FIELDS.
+        IF sy-subrc <> 0.
+          ls_incl-include = <c>.
+          APPEND ls_incl TO rt_incl.
+          APPEND <c> TO lt_queue.
+        ENDIF.
+      ENDLOOP.
+    ENDWHILE.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_CLASS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_class.
+    DATA: lt_incl TYPE ty_incl_tab,
+          lt_rel  TYPE STANDARD TABLE OF seometarel,
+          ls_ref  TYPE ty_ref,
+          lv_type TYPE trobjtype.
+    FIELD-SYMBOLS <r> TYPE seometarel.
+
+    " superclasse e interfaces
+    SELECT * FROM seometarel INTO TABLE lt_rel WHERE clsname = iv_name.
+    LOOP AT lt_rel ASSIGNING <r>.
+      IF <r>-refclsname IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      lv_type = classify_name( <r>-refclsname ).
+      IF lv_type IS INITIAL.
+        lv_type = c_clas.
+      ENDIF.
+      ls_ref-name = <r>-refclsname.
+      ls_ref-type = lv_type.
+      APPEND ls_ref TO rt_refs.
+    ENDLOOP.
+
+    " referencias dentro dos includes de metodo
+    lt_incl = class_includes( iv_name ).
+    APPEND LINES OF refs_from_includes( lt_incl ) TO rt_refs.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_DTEL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_dtel.
+    DATA: lv_domname TYPE dd04l-domname,
+          ls_ref     TYPE ty_ref.
+    SELECT SINGLE domname FROM dd04l INTO lv_domname WHERE rollname = iv_name.
+    IF sy-subrc = 0 AND lv_domname IS NOT INITIAL.
+      ls_ref-name = lv_domname.
+      ls_ref-type = c_doma.
+      APPEND ls_ref TO rt_refs.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_FUGR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_fugr.
+    DATA: lt_incl TYPE ty_incl_tab,
+          lv_main TYPE programm.
+    lv_main = |SAPL{ iv_name }|.
+    lt_incl = collect_includes( iv_prog = lv_main ).
+    rt_refs = refs_from_includes( lt_incl ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_FUNC
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_func.
+    DATA: lv_area TYPE rs38l_area,
+          ls_ref  TYPE ty_ref.
+    SELECT SINGLE area FROM enlfdir INTO lv_area WHERE funcname = iv_name.
+    IF sy-subrc = 0 AND lv_area IS NOT INITIAL.
+      ls_ref-name = lv_area.
+      ls_ref-type = c_fugr.
+      APPEND ls_ref TO rt_refs.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_PROGRAM
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_program.
+    DATA lt_incl TYPE ty_incl_tab.
+    lt_incl = collect_includes( iv_prog = iv_name ).
+    rt_refs = refs_from_includes( lt_incl ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DEPS_TABLE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD deps_table.
+    DATA: lt_fields TYPE STANDARD TABLE OF dd03l,
+          ls_ref    TYPE ty_ref.
+    FIELD-SYMBOLS <f> TYPE dd03l.
+
+    SELECT * FROM dd03l INTO TABLE lt_fields WHERE tabname = iv_name.
+    LOOP AT lt_fields ASSIGNING <f>.
+      IF <f>-rollname IS NOT INITIAL.
+        ls_ref-name = <f>-rollname.
+        ls_ref-type = c_dtel.
+        APPEND ls_ref TO rt_refs.
+      ENDIF.
+      IF <f>-checktable IS NOT INITIAL AND <f>-checktable <> iv_name.
+        ls_ref-name = <f>-checktable.
+        ls_ref-type = c_tabl.
+        APPEND ls_ref TO rt_refs.
+      ENDIF.
+      IF <f>-fieldname CS '.INCLU' AND <f>-precfield IS NOT INITIAL.
+        ls_ref-name = <f>-precfield.
+        ls_ref-type = c_tabl.
+        APPEND ls_ref TO rt_refs.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->DETECT_TYPE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RV                             TYPE        TROBJTYPE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD detect_type.
+    SELECT COUNT(*) FROM trdir WHERE name = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_prog.
+      RETURN.
+    ENDIF.
+
+    DATA lv_clstype TYPE seoclass-clstype.
+    SELECT SINGLE clstype FROM seoclass INTO lv_clstype WHERE clsname = iv_name.
+    IF sy-subrc = 0.
+      IF lv_clstype = 1.
+        rv = c_intf.
+      ELSE.
+        rv = c_clas.
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM tadir
+           WHERE pgmid = 'R3TR' AND object = 'FUGR' AND obj_name = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_fugr.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM dd02l WHERE tabname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_tabl.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM tstc WHERE tcode = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_tran.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM tfdir WHERE funcname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_func.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*) FROM dd04l WHERE rollname = iv_name.
+    IF sy-dbcnt > 0.
+      rv = c_dtel.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->EXTRACT_BETWEEN
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TEXT                        TYPE        CSEQUENCE
+* | [--->] IV_KEY                         TYPE        CSEQUENCE
+* | [<-()] RV                             TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD extract_between.
+    DATA: lt_parts TYPE STANDARD TABLE OF string,
+          lv_after TYPE string.
+    FIELD-SYMBOLS <p> TYPE string.
+
+    SPLIT iv_text AT iv_key INTO TABLE lt_parts.
+    IF lines( lt_parts ) < 2.
+      RETURN.
+    ENDIF.
+    READ TABLE lt_parts INDEX 2 ASSIGNING <p>.
+    lv_after = <p>.
+    SPLIT lv_after AT '\' INTO TABLE lt_parts.
+    READ TABLE lt_parts INDEX 1 ASSIGNING <p>.
+    IF sy-subrc = 0.
+      rv = <p>.
+      TRANSLATE rv TO UPPER CASE.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->GET_DEPENDENCIES
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_dependencies.
+    CASE iv_type.
+      WHEN c_prog.
+        rt_refs = deps_program( iv_name ).
+      WHEN c_clas OR c_intf.
+        rt_refs = deps_class( iv_name ).
+      WHEN c_fugr.
+        rt_refs = deps_fugr( iv_name ).
+      WHEN c_func.
+        rt_refs = deps_func( iv_name ).
+      WHEN c_tabl.
+        rt_refs = deps_table( iv_name ).
+      WHEN c_dtel.
+        rt_refs = deps_dtel( iv_name ).
+      WHEN OTHERS.
+        " DOMA / TRAN nao expandem
+    ENDCASE.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->GET_DESCRIPTION
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE
+* | [<-()] RV                             TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_description.
+    DATA: lt_tp TYPE STANDARD TABLE OF textpool,
+          ls_tp TYPE textpool.
+
+    CASE iv_type.
+      WHEN c_prog.
+        READ TEXTPOOL iv_name INTO lt_tp LANGUAGE sy-langu.
+        READ TABLE lt_tp INTO ls_tp WITH KEY id = 'R'.
+        IF sy-subrc = 0.
+          rv = ls_tp-entry.
+        ENDIF.
+      WHEN c_clas OR c_intf.
+        SELECT SINGLE descript FROM seoclasstx INTO rv
+               WHERE clsname = iv_name AND langu = sy-langu.
+      WHEN c_tabl.
+        SELECT SINGLE ddtext FROM dd02t INTO rv
+               WHERE tabname = iv_name AND ddlanguage = sy-langu AND as4local = 'A'.
+      WHEN c_dtel.
+        SELECT SINGLE ddtext FROM dd04t INTO rv
+               WHERE rollname = iv_name AND ddlanguage = sy-langu AND as4local = 'A'.
+      WHEN c_doma.
+        SELECT SINGLE ddtext FROM dd01t INTO rv
+               WHERE domname = iv_name AND ddlanguage = sy-langu AND as4local = 'A'.
+      WHEN c_func.
+        SELECT SINGLE stext FROM tftit INTO rv
+               WHERE spras = sy-langu AND funcname = iv_name.
+      WHEN c_fugr.
+        SELECT SINGLE areat FROM tlibt INTO rv
+               WHERE spras = sy-langu AND area = iv_name.
+      WHEN c_tran.
+        SELECT SINGLE ttext FROM tstct INTO rv
+               WHERE sprsl = sy-langu AND tcode = iv_name.
+      WHEN OTHERS.
+    ENDCASE.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->GET_PACKAGE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE
+* | [<-()] RV                             TYPE        DEVCLASS
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_package.
+    DATA: lv_object TYPE tadir-object,
+          lv_name   TYPE tadir-obj_name,
+          lv_area   TYPE rs38l_area.
+
+    CASE iv_type.
+      WHEN c_prog. lv_object = 'PROG'.
+      WHEN c_clas. lv_object = 'CLAS'.
+      WHEN c_intf. lv_object = 'INTF'.
+      WHEN c_tabl. lv_object = 'TABL'.
+      WHEN c_dtel. lv_object = 'DTEL'.
+      WHEN c_doma. lv_object = 'DOMA'.
+      WHEN c_tran. lv_object = 'TRAN'.
+      WHEN c_fugr. lv_object = 'FUGR'.
+      WHEN c_func.
+        SELECT SINGLE area FROM enlfdir INTO lv_area WHERE funcname = iv_name.
+        IF sy-subrc = 0.
+          SELECT SINGLE devclass FROM tadir INTO rv
+                 WHERE pgmid = 'R3TR' AND object = 'FUGR' AND obj_name = lv_area.
+        ENDIF.
+        RETURN.
+      WHEN OTHERS.
+        RETURN.
+    ENDCASE.
+
+    lv_name = iv_name.
+    SELECT SINGLE devclass FROM tadir INTO rv
+           WHERE pgmid = 'R3TR' AND object = lv_object AND obj_name = lv_name.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->IS_CUSTOMER
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RV                             TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD is_customer.
+    DATA lv_first TYPE c LENGTH 1.
+    lv_first = iv_name(1).
+    IF lv_first = 'Z' OR lv_first = 'Y'.
+      rv = abap_true.
+    ELSE.
+      rv = abap_false.
+    ENDIF.
+    " OBS: namespaces /XYZ/ tratados como standard por padrao (evita explosao).
+    " Se seus objetos estao em namespace proprio, adicione a regra aqui.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_DEP_EXTRACTOR->NORMALIZE_ROOT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_OBJECT                      TYPE        CSEQUENCE
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE(optional)
+* | [<-()] RS_ROOT                        TYPE        TY_ROOT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD normalize_root.
+    DATA: lv_obj   TYPE sobj_name,
+          lv_type  TYPE trobjtype,
+          lv_pgmna TYPE tstc-pgmna,
+          lv_cinfo TYPE tstc-cinfo,
+          lv_param TYPE tstcp-param,
+          lv_class TYPE string.
+
+    CLEAR mv_error.
+    lv_obj = iv_object.
+    TRANSLATE lv_obj TO UPPER CASE.
+    lv_type = iv_type.
+
+    IF lv_type IS INITIAL.
+      lv_type = detect_type( lv_obj ).
+    ENDIF.
+    IF lv_type IS INITIAL.
+      mv_error = |Objeto { lv_obj } nao encontrado|.
+      RETURN.
+    ENDIF.
+
+    IF lv_type = c_tran.
+      SELECT SINGLE pgmna cinfo FROM tstc INTO (lv_pgmna, lv_cinfo)
+             WHERE tcode = lv_obj.
+      IF sy-subrc <> 0.
+        mv_error = |Transacao { lv_obj } inexistente|.
+        RETURN.
+      ENDIF.
+      IF lv_pgmna IS NOT INITIAL.
+        rs_root-name = lv_pgmna.
+        rs_root-type = c_prog.
+        RETURN.
+      ENDIF.
+      " transacao OO ou de parametros -> TSTCP
+      SELECT SINGLE param FROM tstcp INTO lv_param WHERE tcode = lv_obj.
+      IF sy-subrc = 0 AND lv_param CS 'CLASS='.
+        lv_class = extract_between( iv_text = lv_param iv_key = 'CLASS=' ).
+        rs_root-name = lv_class.
+        rs_root-type = c_clas.
+        RETURN.
+      ENDIF.
+      mv_error = |Transacao { lv_obj } sem programa/classe resolvivel|.
+      RETURN.
+    ENDIF.
+
+    rs_root-name = lv_obj.
+    rs_root-type = lv_type.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_CLASS_SOURCE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_class_source.
+    DATA: lt_incl TYPE ty_incl_tab,
+          lt_part TYPE ty_source_tab,
+          lv_hdr  TYPE string.
+    FIELD-SYMBOLS <i> TYPE ty_incl.
+
+    lt_incl = class_includes( iv_name ).
+    LOOP AT lt_incl ASSIGNING <i>.
+      CLEAR lt_part.
+      READ REPORT <i>-include INTO lt_part.
+      IF sy-subrc = 0.
+        lv_hdr = |*--- include: { <i>-include } ---|.
+        APPEND lv_hdr TO rt_source.
+        APPEND LINES OF lt_part TO rt_source.
+      ENDIF.
+    ENDLOOP.
+    " OBS: class_includes traz os includes de metodo. Se quiser tambem as
+    " secoes de definicao (public/protected/private) e local classes, use
+    " CL_OO_SOURCE=>READ_SOURCE ou acrescente os includes CCDEF/CCIMP/CCMAC.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_DOMA_DEF
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_doma_def.
+    DATA: ls     TYPE dd01l,
+          lt_val TYPE STANDARD TABLE OF dd07l.
+    FIELD-SYMBOLS <v> TYPE dd07l.
+
+    SELECT SINGLE * FROM dd01l INTO ls WHERE domname = iv_name.
+    APPEND |DOMAIN { iv_name } / datatype: { ls-datatype } / len: { ls-leng } / dec: { ls-decimals }| TO rt_source.
+    SELECT * FROM dd07l INTO TABLE lt_val
+           WHERE domname = iv_name AND as4local = 'A' ORDER BY valpos.
+    LOOP AT lt_val ASSIGNING <v>.
+      APPEND |value: { <v>-domvalue_l } - { <v>-domvalue_h }| TO rt_source.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_DTEL_DEF
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_dtel_def.
+    DATA ls TYPE dd04l.
+    SELECT SINGLE * FROM dd04l INTO ls WHERE rollname = iv_name.
+    APPEND |DATA ELEMENT { iv_name }| TO rt_source.
+    APPEND |domain: { ls-domname } / datatype: { ls-datatype } / len: { ls-leng } / dec: { ls-decimals }| TO rt_source.
+    APPEND |reftype: { ls-reftype }| TO rt_source.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_FUGR_SOURCE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_fugr_source.
+    DATA: lt_incl TYPE ty_incl_tab,
+          lt_part TYPE ty_source_tab,
+          lv_main TYPE programm,
+          lv_hdr  TYPE string.
+    FIELD-SYMBOLS <i> TYPE ty_incl.
+
+    lv_main = |SAPL{ iv_name }|.
+    lt_incl = collect_includes( iv_prog = lv_main ).
+    LOOP AT lt_incl ASSIGNING <i>.
+      CLEAR lt_part.
+      READ REPORT <i>-include INTO lt_part.
+      IF sy-subrc = 0.
+        lv_hdr = |*--- { <i>-include } ---|.
+        APPEND lv_hdr TO rt_source.
+        APPEND LINES OF lt_part TO rt_source.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_FUNC_SOURCE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_func_source.
+    DATA: lv_pname   TYPE tfdir-pname,
+          lv_incnr   TYPE tfdir-include,
+          lv_area    TYPE string,
+          lv_include TYPE programm.
+
+    SELECT SINGLE pname include FROM tfdir INTO (lv_pname, lv_incnr)
+           WHERE funcname = iv_name.
+    IF sy-subrc <> 0.
+      mv_error = |FM { iv_name } inexistente|.
+      RETURN.
+    ENDIF.
+    lv_area    = lv_pname+4.                 " remove prefixo 'SAPL'
+    lv_include = |L{ lv_area }U{ lv_incnr }|. " convencao Lxxx Unn
+    READ REPORT lv_include INTO rt_source.
+    IF sy-subrc <> 0.
+      mv_error = |Include { lv_include } do FM nao lido|.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_PROGRAM_SOURCE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_program_source.
+    READ REPORT iv_name INTO rt_source.
+    IF sy-subrc <> 0.
+      mv_error = |Programa { iv_name } sem fonte|.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_TABLE_DEF
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_table_def.
+    DATA: ls_dd02   TYPE dd02l,
+          lt_fields TYPE STANDARD TABLE OF dd03l,
+          lv_line   TYPE string.
+    FIELD-SYMBOLS <f> TYPE dd03l.
+
+    SELECT SINGLE * FROM dd02l INTO ls_dd02 WHERE tabname = iv_name.
+    APPEND |TABLE { iv_name } (tabclass { ls_dd02-tabclass })| TO rt_source.
+    APPEND |FIELD / KEY / DATATYPE / LEN / DEC / DATA-ELEMENT / CHECKTABLE| TO rt_source.
+    SELECT * FROM dd03l INTO TABLE lt_fields WHERE tabname = iv_name ORDER BY position.
+    LOOP AT lt_fields ASSIGNING <f>.
+      lv_line = |{ <f>-fieldname } / { <f>-keyflag } / { <f>-datatype } / | &&
+                |{ <f>-leng } / { <f>-decimals } / { <f>-rollname } / { <f>-checktable }|.
+      APPEND lv_line TO rt_source.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->READ_TRAN_DEF
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [<-()] RT_SOURCE                      TYPE        TY_SOURCE_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD read_tran_def.
+    DATA: ls       TYPE tstc,
+          lv_txt   TYPE tstct-ttext,
+          lv_param TYPE tstcp-param.
+
+    SELECT SINGLE * FROM tstc INTO ls WHERE tcode = iv_name.
+    SELECT SINGLE ttext FROM tstct INTO lv_txt
+           WHERE sprsl = sy-langu AND tcode = iv_name.
+    APPEND |TRANSACTION { iv_name } - { lv_txt }| TO rt_source.
+    APPEND |program: { ls-pgmna } / screen: { ls-dypno } / cinfo: { ls-cinfo }| TO rt_source.
+    SELECT SINGLE param FROM tstcp INTO lv_param WHERE tcode = iv_name.
+    IF sy-subrc = 0.
+      APPEND |param: { lv_param }| TO rt_source.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR->REFS_FROM_INCLUDES
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IT_INCL                        TYPE        TY_INCL_TAB
+* | [<-()] RT_REFS                        TYPE        TY_REF_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD refs_from_includes.
+    DATA: lt_gt    TYPE STANDARD TABLE OF wbcrossgt,
+          lt_cr    TYPE STANDARD TABLE OF cross,
+          ls_ref   TYPE ty_ref,
+          lv_name  TYPE string,
+          lv_dummy TYPE string,
+          lv_type  TYPE trobjtype.
+    FIELD-SYMBOLS: <gt> TYPE wbcrossgt,
+                   <cr> TYPE cross.
+
+    IF it_incl IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    " Referencias OO / tipos / DDIC (indexadas pelo include onde ocorrem)
+    SELECT * FROM wbcrossgt INTO TABLE lt_gt
+      FOR ALL ENTRIES IN it_incl
+      WHERE include = it_incl-include.
+    LOOP AT lt_gt ASSIGNING <gt>.
+      lv_name = <gt>-name.
+      IF lv_name CA '\'.
+        SPLIT lv_name AT '\' INTO lv_name lv_dummy.
+      ENDIF.
+      TRANSLATE lv_name TO UPPER CASE.
+      lv_type = classify_name( lv_name ).
+      IF lv_type IS NOT INITIAL.
+        ls_ref-name = lv_name.
+        ls_ref-type = lv_type.
+        APPEND ls_ref TO rt_refs.
+      ENDIF.
+    ENDLOOP.
+
+    " Referencias classicas (modulos de funcao). TYPE = 'F' no CROSS.
+    " (verifique o dominio de CROSS-TYPE no seu sistema via SE11)
+    SELECT type name include FROM cross INTO CORRESPONDING FIELDS OF TABLE lt_cr
+      FOR ALL ENTRIES IN it_incl
+      WHERE include = it_incl-include.
+    LOOP AT lt_cr ASSIGNING <cr>.
+      IF <cr>-type = 'F'.
+        ls_ref-name = <cr>-name.
+        ls_ref-type = c_func.
+        APPEND ls_ref TO rt_refs.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_DEP_EXTRACTOR->RESOLVE_CLOSURE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE
+* | [--->] IV_DEPTH                       TYPE        I (default =10)
+* | [--->] IV_MAX_OBJECTS                 TYPE        I (default =500)
+* | [<---] ET_OBJECTS                     TYPE        TY_NODE_TAB
+* | [<---] ET_LEAVES                      TYPE        TY_NODE_TAB
+* | [<---] ES_STATS                       TYPE        TY_STATS
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD resolve_closure.
+    DATA: lt_queue   TYPE ty_node_tab,
+          ls_node    TYPE ty_node,
+          lt_children TYPE ty_ref_tab,
+          lt_visited TYPE HASHED TABLE OF ty_ref WITH UNIQUE KEY name type,
+          ls_visited TYPE ty_ref,
+          lv_qidx    TYPE i,
+          lv_total   TYPE i,
+          lv_start   TYPE i,
+          lv_end     TYPE i.
+    FIELD-SYMBOLS: <q> TYPE ty_node,
+                   <c> TYPE ty_ref.
+
+    GET RUN TIME FIELD lv_start.
+    CLEAR: et_objects, et_leaves, es_stats.
+
+    ls_node-name  = iv_name.
+    ls_node-type  = iv_type.
+    ls_node-depth = 0.
+    APPEND ls_node TO lt_queue.
+
+    lv_qidx = 1.
+    WHILE lv_qidx <= lines( lt_queue ).
+      READ TABLE lt_queue INDEX lv_qidx ASSIGNING <q>.
+      lv_qidx = lv_qidx + 1.
+
+      CLEAR ls_visited.
+      ls_visited-name = <q>-name.
+      ls_visited-type = <q>-type.
+      READ TABLE lt_visited WITH TABLE KEY name = ls_visited-name
+                                          type = ls_visited-type
+                            TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        CONTINUE.
+      ENDIF.
+      INSERT ls_visited INTO TABLE lt_visited.
+
+      IF is_customer( <q>-name ) = abap_true.
+        <q>-is_standard = abap_false.
+      ELSE.
+        <q>-is_standard = abap_true.
+      ENDIF.
+      <q>-package     = get_package( iv_name = <q>-name iv_type = <q>-type ).
+      <q>-description = get_description( iv_name = <q>-name iv_type = <q>-type ).
+
+      IF <q>-depth > es_stats-max_depth_reached.
+        es_stats-max_depth_reached = <q>-depth.
+      ENDIF.
+
+      IF <q>-is_standard = abap_true.
+        APPEND <q> TO et_leaves.
+        CONTINUE.
+      ENDIF.
+
+      APPEND <q> TO et_objects.
+      lv_total = lv_total + 1.
+      IF lv_total >= iv_max_objects.
+        es_stats-truncated = abap_true.
+        EXIT.
+      ENDIF.
+
+      IF <q>-depth < iv_depth.
+        lt_children = get_dependencies( iv_name = <q>-name iv_type = <q>-type ).
+        LOOP AT lt_children ASSIGNING <c>.
+          CLEAR ls_node.
+          ls_node-name   = <c>-name.
+          ls_node-type   = <c>-type.
+          ls_node-depth  = <q>-depth + 1.
+          ls_node-parent = <q>-name.
+          APPEND ls_node TO lt_queue.
+        ENDLOOP.
+      ENDIF.
+    ENDWHILE.
+
+    es_stats-objects_count  = lines( et_objects ).
+    es_stats-standard_count = lines( et_leaves ).
+    GET RUN TIME FIELD lv_end.
+    es_stats-runtime_ms = ( lv_end - lv_start ) / 1000.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_DEP_EXTRACTOR->SERIALIZE_OBJECT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAME                        TYPE        SOBJ_NAME
+* | [--->] IV_TYPE                        TYPE        TROBJTYPE(optional)
+* | [<-()] RS_RESULT                      TYPE        TY_SERIALIZED
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD serialize_object.
+    DATA lv_type TYPE trobjtype.
+
+    CLEAR mv_error.
+    lv_type = iv_type.
+    IF lv_type IS INITIAL.
+      lv_type = detect_type( iv_name ).
+    ENDIF.
+    IF lv_type IS INITIAL.
+      mv_error = |Objeto { iv_name } nao encontrado|.
+      RETURN.
+    ENDIF.
+
+    rs_result-name        = iv_name.
+    rs_result-type        = lv_type.
+    rs_result-package     = get_package( iv_name = iv_name iv_type = lv_type ).
+    rs_result-description = get_description( iv_name = iv_name iv_type = lv_type ).
+
+    CASE lv_type.
+      WHEN c_prog.
+        rs_result-source = read_program_source( iv_name ).
+      WHEN c_clas OR c_intf.
+        rs_result-source = read_class_source( iv_name ).
+      WHEN c_fugr.
+        rs_result-source = read_fugr_source( iv_name ).
+      WHEN c_func.
+        rs_result-source = read_func_source( iv_name ).
+      WHEN c_tabl.
+        rs_result-source = read_table_def( iv_name ).
+      WHEN c_dtel.
+        rs_result-source = read_dtel_def( iv_name ).
+      WHEN c_doma.
+        rs_result-source = read_doma_def( iv_name ).
+      WHEN c_tran.
+        rs_result-source = read_tran_def( iv_name ).
+      WHEN OTHERS.
+        mv_error = |Tipo { lv_type } nao serializavel|.
+    ENDCASE.
+  ENDMETHOD.
+ENDCLASS.

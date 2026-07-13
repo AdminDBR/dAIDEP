@@ -1,0 +1,290 @@
+class ZCL_DEP_EXTRACTOR_HTTP definition
+  public
+  create public .
+
+public section.
+
+  interfaces IF_HTTP_EXTENSION .
+  PRIVATE SECTION.
+    METHODS handle_manifest
+      IMPORTING io_server TYPE REF TO if_http_server
+      EXPORTING ev_json   TYPE string
+                ev_status TYPE i.
+
+    METHODS handle_object
+      IMPORTING io_server TYPE REF TO if_http_server
+      EXPORTING ev_json   TYPE string
+                ev_status TYPE i.
+
+    METHODS send_json
+      IMPORTING io_server TYPE REF TO if_http_server
+                iv_status TYPE i
+                iv_json   TYPE string.
+
+    METHODS escape_json
+      IMPORTING iv_in     TYPE csequence
+      RETURNING VALUE(rv) TYPE string.
+ENDCLASS.
+
+
+
+CLASS ZCL_DEP_EXTRACTOR_HTTP IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR_HTTP->ESCAPE_JSON
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_IN                          TYPE        CSEQUENCE
+* | [<-()] RV                             TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD escape_json.
+    DATA lv_s TYPE string.
+    lv_s = iv_in.
+    REPLACE ALL OCCURRENCES OF '\' IN lv_s WITH '\\'.
+    REPLACE ALL OCCURRENCES OF '"' IN lv_s WITH '\"'.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>horizontal_tab IN lv_s WITH '\t'.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf          IN lv_s WITH '\n'.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline        IN lv_s WITH '\n'.
+    rv = lv_s.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR_HTTP->HANDLE_MANIFEST
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IO_SERVER                      TYPE REF TO IF_HTTP_SERVER
+* | [<---] EV_JSON                        TYPE        STRING
+* | [<---] EV_STATUS                      TYPE        I
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD handle_manifest.
+    DATA: lo_ext     TYPE REF TO zcl_dep_extractor,
+          lv_object  TYPE string,
+          lv_type_s  TYPE string,
+          lv_depth_s TYPE string,
+          lv_max_s   TYPE string,
+          lv_type    TYPE trobjtype,
+          lv_depth   TYPE i,
+          lv_max     TYPE i,
+          ls_root    TYPE zcl_dep_extractor=>ty_root,
+          lt_obj     TYPE zcl_dep_extractor=>ty_node_tab,
+          lt_leaf    TYPE zcl_dep_extractor=>ty_node_tab,
+          ls_stats   TYPE zcl_dep_extractor=>ty_stats,
+          lt_json    TYPE STANDARD TABLE OF string,
+          lv_frag    TYPE string,
+          lv_first   TYPE abap_bool,
+          lv_trunc   TYPE string.
+    FIELD-SYMBOLS <n> TYPE zcl_dep_extractor=>ty_node.
+
+    CLEAR: ev_json, ev_status.
+
+    lv_object = io_server->request->get_form_field( 'object' ).
+    IF lv_object IS INITIAL.
+      ev_json   = '{"error":"parametro object obrigatorio"}'.
+      ev_status = 400.
+      RETURN.
+    ENDIF.
+    lv_type_s  = io_server->request->get_form_field( 'type' ).
+    lv_depth_s = io_server->request->get_form_field( 'depth' ).
+    lv_max_s   = io_server->request->get_form_field( 'max_objects' ).
+
+    lv_type = lv_type_s.
+    TRANSLATE lv_type TO UPPER CASE.
+    IF lv_depth_s IS NOT INITIAL.
+      lv_depth = lv_depth_s.
+    ELSE.
+      lv_depth = 10.
+    ENDIF.
+    IF lv_max_s IS NOT INITIAL.
+      lv_max = lv_max_s.
+    ELSE.
+      lv_max = 500.
+    ENDIF.
+
+    CREATE OBJECT lo_ext.
+    ls_root = lo_ext->normalize_root( iv_object = lv_object iv_type = lv_type ).
+    IF lo_ext->mv_error IS NOT INITIAL.
+      ev_json   = |\{"error":"{ escape_json( lo_ext->mv_error ) }"\}|.
+      ev_status = 400.
+      RETURN.
+    ENDIF.
+
+    lo_ext->resolve_closure(
+      EXPORTING iv_name        = ls_root-name
+                iv_type        = ls_root-type
+                iv_depth       = lv_depth
+                iv_max_objects = lv_max
+      IMPORTING et_objects     = lt_obj
+                et_leaves      = lt_leaf
+                es_stats       = ls_stats ).
+
+    APPEND '{' TO lt_json.
+    lv_frag = |"root":\{"name":"{ escape_json( ls_root-name ) }","type":"{ ls_root-type }"\},|.
+    APPEND lv_frag TO lt_json.
+
+    APPEND '"objects":[' TO lt_json.
+    lv_first = abap_true.
+    LOOP AT lt_obj ASSIGNING <n>.
+      IF lv_first = abap_true.
+        lv_first = abap_false.
+      ELSE.
+        APPEND ',' TO lt_json.
+      ENDIF.
+      lv_frag = |\{"name":"{ escape_json( <n>-name ) }","type":"{ <n>-type }",| &&
+                |"package":"{ escape_json( <n>-package ) }",| &&
+                |"description":"{ escape_json( <n>-description ) }",| &&
+                |"parent":"{ escape_json( <n>-parent ) }","depth":{ <n>-depth }\}|.
+      APPEND lv_frag TO lt_json.
+    ENDLOOP.
+    APPEND '],' TO lt_json.
+
+    APPEND '"standard_leaves":[' TO lt_json.
+    lv_first = abap_true.
+    LOOP AT lt_leaf ASSIGNING <n>.
+      IF lv_first = abap_true.
+        lv_first = abap_false.
+      ELSE.
+        APPEND ',' TO lt_json.
+      ENDIF.
+      lv_frag = |\{"name":"{ escape_json( <n>-name ) }","type":"{ <n>-type }",| &&
+                |"description":"{ escape_json( <n>-description ) }"\}|.
+      APPEND lv_frag TO lt_json.
+    ENDLOOP.
+    APPEND '],' TO lt_json.
+
+    IF ls_stats-truncated = abap_true.
+      lv_trunc = 'true'.
+    ELSE.
+      lv_trunc = 'false'.
+    ENDIF.
+    lv_frag = |"stats":\{"objects_count":{ ls_stats-objects_count },| &&
+              |"standard_count":{ ls_stats-standard_count },| &&
+              |"max_depth_reached":{ ls_stats-max_depth_reached },| &&
+              |"truncated":{ lv_trunc },"runtime_ms":{ ls_stats-runtime_ms }\}|.
+    APPEND lv_frag TO lt_json.
+    APPEND '}' TO lt_json.
+
+    CONCATENATE LINES OF lt_json INTO ev_json.
+    ev_status = 200.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR_HTTP->HANDLE_OBJECT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IO_SERVER                      TYPE REF TO IF_HTTP_SERVER
+* | [<---] EV_JSON                        TYPE        STRING
+* | [<---] EV_STATUS                      TYPE        I
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD handle_object.
+    DATA: lo_ext    TYPE REF TO zcl_dep_extractor,
+          lv_name_s TYPE string,
+          lv_type_s TYPE string,
+          lv_name   TYPE sobj_name,
+          lv_type   TYPE trobjtype,
+          ls_res    TYPE zcl_dep_extractor=>ty_serialized,
+          lt_json   TYPE STANDARD TABLE OF string,
+          lv_frag   TYPE string,
+          lv_first  TYPE abap_bool.
+    FIELD-SYMBOLS <l> TYPE string.
+
+    CLEAR: ev_json, ev_status.
+
+    lv_name_s = io_server->request->get_form_field( 'name' ).
+    IF lv_name_s IS INITIAL.
+      ev_json   = '{"error":"parametro name obrigatorio"}'.
+      ev_status = 400.
+      RETURN.
+    ENDIF.
+    lv_type_s = io_server->request->get_form_field( 'type' ).
+
+    lv_name = lv_name_s.
+    TRANSLATE lv_name TO UPPER CASE.
+    lv_type = lv_type_s.
+    TRANSLATE lv_type TO UPPER CASE.
+
+    CREATE OBJECT lo_ext.
+    ls_res = lo_ext->serialize_object( iv_name = lv_name iv_type = lv_type ).
+    IF lo_ext->mv_error IS NOT INITIAL.
+      ev_json   = |\{"error":"{ escape_json( lo_ext->mv_error ) }"\}|.
+      ev_status = 400.
+      RETURN.
+    ENDIF.
+
+    APPEND '{' TO lt_json.
+    lv_frag = |"name":"{ escape_json( ls_res-name ) }","type":"{ ls_res-type }",| &&
+              |"package":"{ escape_json( ls_res-package ) }",| &&
+              |"description":"{ escape_json( ls_res-description ) }",|.
+    APPEND lv_frag TO lt_json.
+    APPEND '"source":[' TO lt_json.
+    lv_first = abap_true.
+    LOOP AT ls_res-source ASSIGNING <l>.
+      IF lv_first = abap_true.
+        lv_first = abap_false.
+      ELSE.
+        APPEND ',' TO lt_json.
+      ENDIF.
+      lv_frag = |"{ escape_json( <l> ) }"|.
+      APPEND lv_frag TO lt_json.
+    ENDLOOP.
+    APPEND ']}' TO lt_json.
+
+    CONCATENATE LINES OF lt_json INTO ev_json.
+    ev_status = 200.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_DEP_EXTRACTOR_HTTP->IF_HTTP_EXTENSION~HANDLE_REQUEST
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] SERVER                         TYPE REF TO IF_HTTP_SERVER
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD if_http_extension~handle_request.
+    DATA: lv_path    TYPE string,
+          lv_json    TYPE string,
+          lv_status  TYPE i,
+          lo_root_ex TYPE REF TO cx_root.
+
+    lv_path = server->request->get_header_field( name = '~path_info' ).
+    TRANSLATE lv_path TO LOWER CASE.
+
+    TRY.
+        IF lv_path CS '/manifest'.
+          handle_manifest( EXPORTING io_server = server
+                           IMPORTING ev_json = lv_json ev_status = lv_status ).
+        ELSEIF lv_path CS '/object'.
+          handle_object( EXPORTING io_server = server
+                         IMPORTING ev_json = lv_json ev_status = lv_status ).
+        ELSE.
+          lv_json   = '{"error":"recurso desconhecido - use /manifest ou /object"}'.
+          lv_status = 404.
+        ENDIF.
+        send_json( io_server = server iv_status = lv_status iv_json = lv_json ).
+
+      CATCH cx_root INTO lo_root_ex.
+        lv_json = |\{"error":"{ escape_json( lo_root_ex->get_text( ) ) }"\}|.
+        send_json( io_server = server iv_status = 500 iv_json = lv_json ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_DEP_EXTRACTOR_HTTP->SEND_JSON
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IO_SERVER                      TYPE REF TO IF_HTTP_SERVER
+* | [--->] IV_STATUS                      TYPE        I
+* | [--->] IV_JSON                        TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD send_json.
+    DATA lv_reason TYPE string.
+    CASE iv_status.
+      WHEN 200.    lv_reason = 'OK'.
+      WHEN 400.    lv_reason = 'Bad Request'.
+      WHEN 404.    lv_reason = 'Not Found'.
+      WHEN OTHERS. lv_reason = 'Error'.
+    ENDCASE.
+    io_server->response->set_header_field( name  = 'Content-Type'
+                                           value = 'application/json; charset=utf-8' ).
+    io_server->response->set_status( code = iv_status reason = lv_reason ).
+    io_server->response->set_cdata( iv_json ).
+  ENDMETHOD.
+ENDCLASS.
